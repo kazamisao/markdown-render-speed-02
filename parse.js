@@ -113,17 +113,26 @@ function escCode(s) {
     .replace(/'/g, '&#39;');
 }
 
-// Link href: marked percent-encodes like encodeURI and does not escape &.
+// Link href: like encodeURI, except a literal % is left alone (so an
+// existing %20 or a bare 98% survives instead of becoming %25).
 function encodeHref(s) {
   try {
-    return encodeURI(s);
+    return encodeURI(s).replace(/%25/g, '%');
   } catch (_e) {
+    // Lone surrogate in the string: encode char by char.
     let out = '';
-    for (let i = 0; i < s.length; i++) {
-      const c = s[i];
-      out += c.charCodeAt(0) < 128 ? encodeURIComponent(c) : c;
+    for (const c of s) {
+      if (c === '%') {
+        out += '%';
+      } else {
+        try {
+          out += encodeURIComponent(c);
+        } catch (_e2) {
+          out += c;
+        }
+      }
     }
-    return out;
+    return out.replace(/%25/g, '%');
   }
 }
 
@@ -422,7 +431,17 @@ function splitTableRow(line) {
   for (let k = 0; k < s.length; k++) {
     const c = s[k];
     if (c === '\\' && k + 1 < s.length && s[k + 1] === '|') {
-      cur += '\\|';
+      // An escaped pipe is a literal pipe in the cell (the backslash is
+      // consumed here, before inline parsing, so a code span sees "|").
+      cur += '|';
+      k++;
+      continue;
+    }
+    if (c === '\\' && k + 1 < s.length && s[k + 1] === '\\') {
+      // An escaped backslash: keep both, so a following "|" is a real
+      // separator instead of looking like an escaped pipe.
+      cur += s[k];
+      cur += s[k + 1];
       k++;
       continue;
     }
@@ -883,6 +902,9 @@ function parseBlocks(lines, endsWithNl) {
         const restI = linePrefix + raw.slice(off);
         const lwI = leadWs(restI, col);
         if (lwI.cols < node.indent) {
+          // Same as for a block quote: an open fenced code block absorbs
+          // the line even when it is not indented far enough for the item.
+          if (tip().t === 'fence') break;
           failAt = j;
           break;
         }
@@ -1565,6 +1587,7 @@ function tokenize(s, refs, opts) {
           flush(i);
           toks.push({
             t: 'link',
+            auto: true,
             href: 'http://' + cand,
             title: null,
             kids: { toks: [{ t: 'txt', s: cand }], matches: [] },
@@ -1589,6 +1612,7 @@ function tokenize(s, refs, opts) {
               flush(i);
               toks.push({
                 t: 'link',
+                auto: true,
                 href: cand,
                 title: null,
                 kids: { toks: [{ t: 'txt', s: cand }], matches: [] },
@@ -1616,6 +1640,7 @@ function tokenize(s, refs, opts) {
           flush(start);
           toks.push({
             t: 'link',
+            auto: true,
             href: 'mailto:' + addr,
             title: null,
             kids: { toks: [{ t: 'txt', s: addr }], matches: [] },
@@ -1677,6 +1702,8 @@ function tokenize(s, refs, opts) {
       ) {
         content = content.slice(1, -1);
       }
+      // Backslash escapes are not processed inside code spans: the
+      // content is literal.
       flush(i);
       toks.push({ t: 'code', s: content });
       advance(found + len);
@@ -1687,7 +1714,9 @@ function tokenize(s, refs, opts) {
       let k = i;
       while (k < n && s[k] === c) k++;
       const len = k - i;
-      if (c === '~' && len < 2) {
+      // Strikethrough: a run of one or two tildes is a delimiter; three
+      // or more is literal text (~~~not~~~ does not strike).
+      if (c === '~' && len >= 3) {
         advance(k);
         continue;
       }
@@ -1821,6 +1850,7 @@ function tokenize(s, refs, opts) {
         flush(i);
         toks.push({
           t: 'link',
+          auto: true,
           href: url,
           title: null,
           kids: { toks: [{ t: 'txt', s: url }], matches: [] },
@@ -1837,6 +1867,7 @@ function tokenize(s, refs, opts) {
         flush(i);
         toks.push({
           t: 'link',
+          auto: true,
           href: 'mailto:' + addr,
           title: null,
           kids: { toks: [{ t: 'txt', s: addr }], matches: [] },
@@ -1961,7 +1992,12 @@ function renderTokens(toks, matches) {
     else if (tk.t === 'html') out += tk.s;
     else if (tk.t === 'htmlEsc') out += escText(tk.s);
     else if (tk.t === 'link') {
-      out += '<a href="' + encodeHref(tk.href) + '"';
+      // An autolink's href escapes & (unlike a normal link's href, where
+      // a bare & stays). encodeHref already percent-encodes the rest.
+      const href = tk.auto
+        ? encodeHref(tk.href).replace(/&/g, '&amp;')
+        : encodeHref(tk.href);
+      out += '<a href="' + href + '"';
       if (tk.title !== null && tk.title !== undefined) {
         out += ' title="' + escAttrKeepEnt(tk.title) + '"';
       }
