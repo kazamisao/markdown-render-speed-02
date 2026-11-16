@@ -103,6 +103,14 @@ const O = {
   headingBeginRegex: cachedIndentRegex((indent) => new RegExp(`^ {0,${indent}}#{1,6}(?:\\s|$)`)),
   htmlBeginRegex: cachedIndentRegex((indent) => new RegExp(`^ {0,${indent}}(?:</?(?:${TAG})(?: +|$|/?>)|<(?:(?:script|pre|style|textarea)(?:[\\s>]|$)|!--)|<\\?|<![A-Za-z]|<!\\[CDATA\\[)`, 'i')),
   blockquoteBeginRegex: cachedIndentRegex((indent) => new RegExp(`^ {0,${indent}}>`)),
+  // One test for every line that can end a list item: a fence, a heading,
+  // an html block, a blockquote, a new bullet or a thematic break.
+  listBreakRegex: cachedIndentRegex((indent) => new RegExp(
+    `^ {0,${indent}}(?:(?:\`\`\`|~~~)|#{1,6}(?:\\s|$)|(?:</?(?:${TAG})(?: +|$|/?>)|<(?:(?:script|pre|style|textarea)(?:[\\s>]|$)|!--)|<\\?|<![A-Za-z]|<!\\[CDATA\\[)|>|(?:[*+-]|\\d{1,9}[.)])((?:[ \\t][^\\n]*)?(?:\\n|$))|(?:(?:-[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:\\*[ \\t]*){3,})(?:\\n+|$))`, 'i')),
+  // The same, without the blockquote and bullet alternatives, for the
+  // lazy-continuation check against the previous line.
+  listBreakLineRegex: cachedIndentRegex((indent) => new RegExp(
+    `^ {0,${indent}}(?:(?:\`\`\`|~~~)|#{1,6}(?:\\s|$)|(?:</?(?:${TAG})(?: +|$|/?>)|<(?:(?:script|pre|style|textarea)(?:[\\s>]|$)|!--)|<\\?|<![A-Za-z]|<!\\[CDATA\\[)|(?:(?:-[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:\\*[ \\t]*){3,})(?:\\n+|$))`, 'i')),
 };
 
 function cachedIndentRegex(create) {
@@ -218,6 +226,7 @@ function makeBlockquoteParagraph() {
 }
 const BLOCKQUOTE_PARAGRAPH = makeBlockquoteParagraph();
 const BLOCK_BLOCKQUOTE = edit(/^( {0,3}> ?(?:(?![ \t]*(?:\n|$))(paragraph)|[^\n]*)(?:\n|$))+/).replace('paragraph', BLOCKQUOTE_PARAGRAPH).regex();
+const LHEADING_GUARD = /\n {0,3}[=-]/;
 
 // ---------------------------------------------------------------------------
 // Inline grammar (GFM).
@@ -591,6 +600,13 @@ function expandTabs(line, indent = 0) {
   return expanded;
 }
 
+// True when s holds only whitespace — the same test as s.trim() === '',
+// without allocating the trimmed copy.
+const BLANK_RE = /^\s*$/;
+function isBlankLine(s) {
+  return BLANK_RE.test(s);
+}
+
 function indentCodeCompensation(raw, text) {
   const m = raw.match(O.indentCodeCompensation);
   if (m === null) return text;
@@ -943,6 +959,42 @@ function tryUrl(ctx, src) {
 
 const PUNCT_RE = /^[\p{P}\p{S}]/u;
 
+// Number of Unicode code points in s (a surrogate pair counts as one).
+function codePointLength(s) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      const d = s.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) i++;
+    }
+    n++;
+  }
+  return n;
+}
+
+// Length in UTF-16 code units of the first code point of s (1 or 2).
+function firstCodePointLength(s) {
+  if (s.length === 0) return 0;
+  const c = s.charCodeAt(0);
+  if (c >= 0xd800 && c <= 0xdbff && s.length > 1) {
+    const d = s.charCodeAt(1);
+    if (d >= 0xdc00 && d <= 0xdfff) return 2;
+  }
+  return 1;
+}
+
+// Last code point of a string of at most two UTF-16 code units.
+function lastCodePointOfPair(tail) {
+  if (tail.length === 0) return '';
+  if (tail.length === 2) {
+    const c = tail.charCodeAt(0);
+    const d = tail.charCodeAt(1);
+    if (c >= 0xd800 && c <= 0xdbff && d >= 0xdc00 && d <= 0xdfff) return tail;
+  }
+  return tail[tail.length - 1];
+}
+
 function tryEmStrong(ctx, src, masked, closers, prevChar, plain = false) {
   const match = EM_STRONG_L_DELIM.exec(src);
   if (!match) return null;
@@ -954,7 +1006,7 @@ function tryEmStrong(ctx, src, masked, closers, prevChar, plain = false) {
   const srcStart = masked.length - src.length;
   let runStart = srcStart;
   while (runStart > 0 && masked[runStart - 1] === delimChar) runStart--;
-  const runPrevChar = [...masked.slice(Math.max(0, runStart - 2), runStart)].at(-1) ?? '';
+  const runPrevChar = lastCodePointOfPair(masked.slice(Math.max(0, runStart - 2), runStart));
   const runPrevPunct = runPrevChar === '*' || runPrevChar === '_' || !!INLINE_PUNCTUATION.exec(runPrevChar);
   if (runStart < srcStart) prevChar = runPrevChar;
   const prevPunct = runStart < srcStart ? runPrevPunct : !!INLINE_PUNCTUATION.exec(prevChar);
@@ -963,7 +1015,7 @@ function tryEmStrong(ctx, src, masked, closers, prevChar, plain = false) {
 
   const nextChar = match[1] || match[3] || '';
   if (!nextChar || !prevChar || prevPunct) {
-    const lLength = [...match[0]].length - 1;
+    const lLength = codePointLength(match[0]) - 1;
     let rDelim;
     let rLength;
     let delimTotal = lLength;
@@ -986,7 +1038,7 @@ function tryEmStrong(ctx, src, masked, closers, prevChar, plain = false) {
       if (m.index > lastCloserInWindow) break;
       rDelim = m[1] || m[2] || m[3] || m[4] || m[5] || m[6];
       if (!rDelim) continue;
-      rLength = [...rDelim].length;
+      rLength = codePointLength(rDelim);
 
       if (m[3] || m[4]) {
         delimTotal += rLength;
@@ -1003,7 +1055,7 @@ function tryEmStrong(ctx, src, masked, closers, prevChar, plain = false) {
       if (delimTotal > 0) continue;
 
       rLength = Math.min(rLength, rLength + delimTotal + midDelimTotal);
-      const lastCharLength = [...m[0]][0].length;
+      const lastCharLength = firstCodePointLength(m[0]);
       const raw = src.slice(0, lLength + m.index + lastCharLength + rLength);
 
       if (Math.min(lLength, rLength) % 2) {
@@ -1028,7 +1080,7 @@ function tryDel(ctx, src, masked, closers, prevChar, plain = false) {
   if (!match) return null;
   const nextChar = match[1] || '';
   if (!nextChar || !prevChar || INLINE_PUNCTUATION.exec(prevChar)) {
-    const lLength = [...match[0]].length - 1;
+    const lLength = codePointLength(match[0]) - 1;
     let rDelim;
     let rLength;
     let delimTotal = lLength;
@@ -1044,7 +1096,7 @@ function tryDel(ctx, src, masked, closers, prevChar, plain = false) {
       if (m.index > lastCloserInWindow) break;
       rDelim = m[1] || m[2] || m[3] || m[4] || m[5] || m[6];
       if (!rDelim) continue;
-      rLength = [...rDelim].length;
+      rLength = codePointLength(rDelim);
       if (rLength !== lLength) continue;
       if (m[3] || m[4]) {
         delimTotal += rLength;
@@ -1053,7 +1105,7 @@ function tryDel(ctx, src, masked, closers, prevChar, plain = false) {
       delimTotal -= rLength;
       if (delimTotal > 0) continue;
       rLength = Math.min(rLength, rLength + delimTotal);
-      const lastCharLength = [...m[0]][0].length;
+      const lastCharLength = firstCodePointLength(m[0]);
       const raw = src.slice(0, lLength + m.index + lastCharLength + rLength);
       const text = raw.slice(lLength, -lLength);
       const parts = [];
@@ -1076,10 +1128,21 @@ function tryDel(ctx, src, masked, closers, prevChar, plain = false) {
 //   * the end of the string
 // ---------------------------------------------------------------------------
 
-const EMAIL_RUN_RE = /[A-Za-z0-9.!#$%&'*+\/=?_`{\|}~-]+@/g;
-const HARD_BREAK_RE = / {2,}\n/g;
-const PROTOCOL_RE = /[hH][tT][tT][pP][sS]?:\/\/|[fF][tT][pP]:\/\//g;
-const SPECIAL_CHARS = new Set(['\\', '<', '!', '[', '`', '*', '~', '_']);
+const SPECIAL_RE = /[\\<!\[`*~_]/g;
+
+// Characters that may appear in the local part of an extended autolink
+// email address (the same class the email lookahead uses).
+function isEmailCharCode(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+    || c === 46 || c === 33 || c === 35 || c === 36 || c === 37 || c === 38
+    || c === 39 || c === 42 || c === 43 || c === 47 || c === 61 || c === 63
+    || c === 94 || c === 95 || c === 96 || c === 123 || c === 124
+    || c === 125 || c === 126 || c === 45;
+}
+
+function isAlnumCode(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
 
 function isWsOrWwwPrev(c) {
   return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v'
@@ -1101,49 +1164,66 @@ function scanTextLen(s) {
     firstLen = 1;
   }
   // A lone non-alphanumeric char before mailto:/xmpp: is its own chunk.
-  if (firstLen === 1 && !/[A-Za-z0-9]/.test(c0)) {
-    const rest = s.slice(1);
-    if (rest.startsWith('mailto:') || rest.startsWith('xmpp:')) return 1;
+  if (firstLen === 1 && !isAlnumCode(s.charCodeAt(0))) {
+    if (s.startsWith('mailto:', 1) || s.startsWith('xmpp:', 1)) return 1;
   }
 
   let stop = n;
 
   // Delimiter characters.
-  for (let i = firstLen; i < n; i++) {
-    if (SPECIAL_CHARS.has(s[i])) { stop = i; break; }
+  SPECIAL_RE.lastIndex = firstLen;
+  let m = SPECIAL_RE.exec(s);
+  if (m) stop = m.index;
+
+  // Protocol:// — only when '://' occurs at all. The protocol must start
+  // four (http, ftp) or five (https) characters before the slashes.
+  let p = s.indexOf('://', firstLen);
+  while (p !== -1 && p < stop) {
+    const lower4 = s.slice(p - 4, p).toLowerCase();
+    const lower5 = s.slice(p - 5, p).toLowerCase();
+    if (p - 4 >= firstLen && (lower4 === 'http' || lower4 === 'ftp')) { stop = p - 4; break; }
+    if (p - 5 >= firstLen && lower5 === 'https') { stop = p - 5; break; }
+    p = s.indexOf('://', p + 1);
   }
 
-  // Protocol://
-  PROTOCOL_RE.lastIndex = firstLen;
-  let m = PROTOCOL_RE.exec(s);
-  if (m && m.index < stop) stop = m.index;
-
-  // www. with a valid predecessor.
-  let idx = s.indexOf('www.', firstLen);
-  while (idx !== -1 && idx < stop) {
-    if (isWsOrWwwPrev(s[idx - 1])) { stop = idx; break; }
-    idx = s.indexOf('www.', idx + 1);
-  }
-
-  // Email-like run.
-  EMAIL_RUN_RE.lastIndex = firstLen;
-  m = EMAIL_RUN_RE.exec(s);
-  if (m && m.index < stop) stop = m.index;
-
-  // mailto:/xmpp: after a non-alphanumeric character.
-  for (const proto of ['mailto:', 'xmpp:']) {
-    let p = s.indexOf(proto, firstLen);
-    while (p !== -1 && p < stop) {
-      if (p - 1 >= firstLen && !/[A-Za-z0-9]/.test(s[p - 1])) { stop = p; break; }
-      p = s.indexOf(proto, p + 1);
+  // www. with a valid predecessor — only when 'www.' occurs at all.
+  if (s.indexOf('www.', firstLen) !== -1) {
+    let idx = s.indexOf('www.', firstLen);
+    while (idx !== -1 && idx < stop) {
+      if (isWsOrWwwPrev(s[idx - 1])) { stop = idx; break; }
+      idx = s.indexOf('www.', idx + 1);
     }
   }
 
-  // Two or more spaces followed by a newline.
-  HARD_BREAK_RE.lastIndex = 0;
-  m = HARD_BREAK_RE.exec(s);
-  if (m) {
-    const k = m.index;
+  // Email-like run — only when '@' occurs at all. For each '@', walk back
+  // over the email characters before it; the run's start (clamped to the
+  // first unconsumed position) is where the text stops.
+  let at = s.indexOf('@', firstLen);
+  while (at !== -1 && at < stop) {
+    let runStart = at;
+    while (runStart > 0 && isEmailCharCode(s.charCodeAt(runStart - 1))) runStart--;
+    if (runStart < firstLen) runStart = firstLen;
+    if (runStart < at && runStart < stop) { stop = runStart; break; }
+    at = s.indexOf('@', at + 1);
+  }
+
+  // mailto:/xmpp: after a non-alphanumeric character.
+  if (s.indexOf('mailto:', firstLen) !== -1 || s.indexOf('xmpp:', firstLen) !== -1) {
+    for (const proto of ['mailto:', 'xmpp:']) {
+      let p = s.indexOf(proto, firstLen + 1);
+      while (p !== -1 && p < stop) {
+        if (p - 1 >= firstLen && !isAlnumCode(s.charCodeAt(p - 1))) { stop = p; break; }
+        p = s.indexOf(proto, p + 1);
+      }
+    }
+  }
+
+  // Two or more spaces followed by a newline — only when '  \n' occurs.
+  // The run starts where the spaces before that occurrence begin.
+  const hb = s.indexOf('  \n', firstLen);
+  if (hb !== -1) {
+    let k = hb;
+    while (k > 0 && s[k - 1] === ' ') k--;
     if (k === firstLen) {
       if (firstLen < stop) stop = firstLen;
     } else if (k > firstLen && s[k - 1] !== ' ' && k < stop) {
@@ -1156,15 +1236,14 @@ function scanTextLen(s) {
 
 // Fast-path test: does this inline source contain anything any inline rule
 // could act on? If not, the whole run is one escaped text chunk.
+const PLAIN_CHECK_RE = /[\\<\[`*_~@!]/;
 function plainInlineFastPath(s) {
-  if (s.includes('  \n')) return false;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === '\\' || c === '<' || c === '[' || c === '`' || c === '*' || c === '_'
-      || c === '~' || c === '@' || c === '!') return false;
-  }
-  if (s.includes('www.') || s.includes('://') || s.includes('mailto:') || s.includes('xmpp:')) return false;
-  return true;
+  return !PLAIN_CHECK_RE.test(s)
+    && s.indexOf('  \n') === -1
+    && s.indexOf('www.') === -1
+    && s.indexOf('://') === -1
+    && s.indexOf('mailto:') === -1
+    && s.indexOf('xmpp:') === -1;
 }
 
 // The inline loop. `plain` renders as plain text (image alt text):
@@ -1181,13 +1260,16 @@ function inlineRun(ctx, src, out, plain = false) {
     return;
   }
 
-  // Masked source + closer hints, built once per run that needs them.
+  // Masked source + closer hints, built lazily on the first emphasis or
+  // strikethrough attempt in this run (many runs never need them).
   let masked = null;
   let closers = null;
-  if (src.includes('*') || src.includes('_') || src.includes('~')) {
-    masked = maskSrc(ctx, src);
-    closers = scanLastClosers(masked);
-  }
+  const ensureMask = () => {
+    if (masked === null) {
+      masked = maskSrc(ctx, src);
+      closers = scanLastClosers(masked);
+    }
+  };
 
   const prevLinkParenPossible = ctx.linkParenPossible;
   ctx.linkParenPossible = prevLinkParenPossible && src.includes(')');
@@ -1238,12 +1320,11 @@ function inlineRun(ctx, src, out, plain = false) {
         }
       }
     } else if (ch === '*' || ch === '_') {
-      if (masked !== null) {
-        const em = tryEmStrong(ctx, s, masked, closers, prevChar, plain);
-        if (em) {
-          out.push(em.html);
-          consumed = em.len;
-        }
+      ensureMask();
+      const em = tryEmStrong(ctx, s, masked, closers, prevChar, plain);
+      if (em) {
+        out.push(em.html);
+        consumed = em.len;
       }
     } else if (ch === '`') {
       const code = tryCodespan(s);
@@ -1258,12 +1339,11 @@ function inlineRun(ctx, src, out, plain = false) {
         consumed = br.len;
       }
     } else if (ch === '~') {
-      if (masked !== null) {
-        const del = tryDel(ctx, s, masked, closers, prevChar, plain);
-        if (del) {
-          out.push(del.html);
-          consumed = del.len;
-        }
+      ensureMask();
+      const del = tryDel(ctx, s, masked, closers, prevChar, plain);
+      if (del) {
+        out.push(del.html);
+        consumed = del.len;
       }
     } else if (/[A-Za-z0-9._+\-]/.test(ch)) {
       if (!ctx.inLink) {
@@ -1416,15 +1496,17 @@ function blockTokens(src, nodes, ctx, top, lastParagraphClipped = false) {
       }
     }
 
-    // table (gfm)
+    // table (gfm) — only when the second line can be a delimiter row
+    // (it must hold a dash and a pipe or a colon).
     if ((node = parseTable(src))) {
       src = src.substring(node.raw.length);
       nodes.push(node);
       continue;
     }
 
-    // setext heading
-    if ((cap = BLOCK_LHEADING.exec(src))) {
+    // setext heading — only when some later line can be an underline
+    // (a newline, up to three spaces, then = or -).
+    if (LHEADING_GUARD.test(src) && (cap = BLOCK_LHEADING.exec(src))) {
       const text = cap[1].trim();
       src = src.substring(cap[0].length);
       nodes.push({
@@ -1578,11 +1660,15 @@ function parseList(src, ctx) {
     const itemStart = taken();
     rest = rest.substring(cap[0].length);
 
-    const firstLine = cap[2].split('\n', 1)[0];
+    const firstNl = cap[2].indexOf('\n');
+    const firstLine = firstNl === -1 ? cap[2] : cap[2].slice(0, firstNl);
     const bulletIndent = cap[1].length;
-    let line = firstLine.replace(O.leadingSpaceTab, (ws) => expandTabs(ws, bulletIndent));
-    let nextLine = rest.split('\n', 1)[0];
-    let blankLine = !line.trim();
+    let line = firstLine.includes('\t')
+      ? firstLine.replace(O.leadingSpaceTab, (ws) => expandTabs(ws, bulletIndent))
+      : firstLine;
+    const restNl = rest.indexOf('\n');
+    let nextLine = restNl === -1 ? rest : rest.slice(0, restNl);
+    let blankLine = isBlankLine(line);
 
     let indent = 0;
     if (blankLine) {
@@ -1600,34 +1686,28 @@ function parseList(src, ctx) {
     }
 
     if (!endEarly) {
-      const nextBulletRegex = O.nextBulletRegex(indent);
-      const hrRegex = O.hrRegex(indent);
-      const fencesBeginRegex = O.fencesBeginRegex(indent);
-      const headingBeginRegex = O.headingBeginRegex(indent);
-      const htmlBeginRegex = O.htmlBeginRegex(indent);
-      const blockquoteBeginRegex = O.blockquoteBeginRegex(indent);
+      const listBreak = O.listBreakRegex(indent);
+      const listBreakLine = O.listBreakLineRegex(indent);
 
       while (rest) {
-        const rawLine = rest.split('\n', 1)[0];
+        const nl = rest.indexOf('\n');
+        const rawLine = nl === -1 ? rest : rest.slice(0, nl);
         nextLine = rawLine;
-        const nextLineWithoutTabs = nextLine.replace(O.leadingSpaceTab, (ws) => expandTabs(ws));
+        const nextLineWithoutTabs = nextLine.includes('\t')
+          ? nextLine.replace(O.leadingSpaceTab, (ws) => expandTabs(ws))
+          : nextLine;
 
-        if (fencesBeginRegex.test(nextLine)) break;
-        if (headingBeginRegex.test(nextLine)) break;
-        if (htmlBeginRegex.test(nextLine)) break;
-        if (blockquoteBeginRegex.test(nextLine)) break;
-        if (nextBulletRegex.test(nextLine)) break;
-        if (hrRegex.test(nextLine)) break;
+        // End list item at a fence, heading, html block, blockquote, new
+        // bullet or thematic break.
+        if (listBreak.test(nextLine)) break;
 
-        if (nextLineWithoutTabs.search(O.nonSpaceChar) >= indent || !nextLine.trim()) {
+        if (nextLineWithoutTabs.search(O.nonSpaceChar) >= indent || isBlankLine(nextLine)) {
           itemContents += '\n' + nextLineWithoutTabs.slice(indent);
         } else {
           if (blankLine) break;
-          if (line.replace(O.tabCharGlobal, '    ').search(O.nonSpaceChar) >= 4) break;
-          if (fencesBeginRegex.test(line)) break;
-          if (headingBeginRegex.test(line)) break;
-          if (htmlBeginRegex.test(line)) break;
-          if (hrRegex.test(line)) break;
+          const lineNoTabs = line.includes('\t') ? line.replace(O.tabCharGlobal, '    ') : line;
+          if (lineNoTabs.search(O.nonSpaceChar) >= 4) break;
+          if (listBreakLine.test(line)) break;
 
           // A lazy continuation can look like a setext underline after
           // list indentation is removed. Keep it in the paragraph.
@@ -1639,8 +1719,8 @@ function parseList(src, ctx) {
           itemContents += '\n' + continuation;
         }
 
-        blankLine = !nextLine.trim();
-        rest = rest.substring(rawLine.length + 1);
+        blankLine = isBlankLine(nextLine);
+        rest = nl === -1 ? '' : rest.slice(nl + 1);
         line = nextLineWithoutTabs.slice(indent);
       }
     }
@@ -1736,6 +1816,14 @@ function parseList(src, ctx) {
 }
 
 function parseTable(src) {
+  // Cheap necessary check: the delimiter row is the second line and must
+  // hold a dash and a pipe or a colon.
+  const firstNl = src.indexOf('\n');
+  if (firstNl === -1) return null;
+  const secondNl = src.indexOf('\n', firstNl + 1);
+  const secondLine = secondNl === -1 ? src.slice(firstNl + 1) : src.slice(firstNl + 1, secondNl);
+  if (secondLine.indexOf('-') === -1) return null;
+  if (secondLine.indexOf('|') === -1 && secondLine.indexOf(':') === -1) return null;
   const cap = BLOCK_TABLE.exec(src);
   if (!cap) return null;
   if (!O.tableDelimiter.test(cap[2])) return null;
@@ -1792,31 +1880,29 @@ function renderBlocks(nodes, ctx, out) {
         }
         break;
       }
-      case 'heading': {
-        const parts = [];
-        renderInline(ctx, node.text, parts);
-        out.push(`<h${node.depth}>${parts.join('')}</h${node.depth}>\n`);
+      case 'heading':
+        out.push(`<h${node.depth}>`);
+        renderInline(ctx, node.text, out);
+        out.push(`</h${node.depth}>\n`);
         break;
-      }
       case 'hr':
         out.push('<hr>\n');
         break;
-      case 'blockquote': {
-        const parts = [];
-        renderBlocks(node.nodes, ctx, parts);
-        out.push(`<blockquote>\n${parts.join('')}</blockquote>\n`);
+      case 'blockquote':
+        out.push('<blockquote>\n');
+        renderBlocks(node.nodes, ctx, out);
+        out.push('</blockquote>\n');
         break;
-      }
       case 'list': {
         const type = node.ordered ? 'ol' : 'ul';
         const startAttr = (node.ordered && node.start !== 1) ? (' start="' + node.start + '"') : '';
-        const parts = [];
+        out.push('<' + type + startAttr + '>\n');
         for (const item of node.items) {
-          const itemParts = [];
-          renderBlocks(item.nodes, ctx, itemParts);
-          parts.push(`<li>${itemParts.join('')}</li>\n`);
+          out.push('<li>');
+          renderBlocks(item.nodes, ctx, out);
+          out.push('</li>\n');
         }
-        out.push('<' + type + startAttr + '>\n' + parts.join('') + '</' + type + '>\n');
+        out.push('</' + type + '>\n');
         break;
       }
       case 'checkbox':
@@ -1825,45 +1911,38 @@ function renderBlocks(nodes, ctx, out) {
       case 'html':
         out.push(node.text);
         break;
-      case 'paragraph': {
-        const parts = [];
-        if (node.checkbox) parts.push(checkboxHtml(node.checkbox));
-        renderInline(ctx, node.text, parts);
-        out.push(`<p>${parts.join('')}</p>\n`);
+      case 'paragraph':
+        out.push('<p>');
+        if (node.checkbox) out.push(checkboxHtml(node.checkbox));
+        renderInline(ctx, node.text, out);
+        out.push('</p>\n');
         break;
-      }
-      case 'text': {
-        const parts = [];
-        if (node.checkbox) parts.push(checkboxHtml(node.checkbox));
-        renderInline(ctx, node.text, parts);
-        out.push(parts.join(''));
+      case 'text':
+        if (node.checkbox) out.push(checkboxHtml(node.checkbox));
+        renderInline(ctx, node.text, out);
         break;
-      }
       case 'table': {
-        const parts = [];
-        let headerCells = '';
+        out.push('<table>\n<thead>\n<tr>\n');
         for (const cell of node.header) {
-          const cellParts = [];
-          renderInline(ctx, cell.text, cellParts);
-          headerCells += cell.align
-            ? `<th align="${cell.align}">${cellParts.join('')}</th>\n`
-            : `<th>${cellParts.join('')}</th>\n`;
+          out.push(cell.align ? `<th align="${cell.align}">` : '<th>');
+          renderInline(ctx, cell.text, out);
+          out.push('</th>\n');
         }
-        parts.push(`<tr>\n${headerCells}</tr>\n`);
-        let body = '';
-        for (const row of node.rows) {
-          let rowCells = '';
-          for (const cell of row) {
-            const cellParts = [];
-            renderInline(ctx, cell.text, cellParts);
-            rowCells += cell.align
-              ? `<td align="${cell.align}">${cellParts.join('')}</td>\n`
-              : `<td>${cellParts.join('')}</td>\n`;
+        out.push('</tr>\n</thead>\n');
+        if (node.rows.length > 0) {
+          out.push('<tbody>');
+          for (const row of node.rows) {
+            out.push('<tr>\n');
+            for (const cell of row) {
+              out.push(cell.align ? `<td align="${cell.align}">` : '<td>');
+              renderInline(ctx, cell.text, out);
+              out.push('</td>\n');
+            }
+            out.push('</tr>\n');
           }
-          body += `<tr>\n${rowCells}</tr>\n`;
+          out.push('</tbody>');
         }
-        if (body) body = `<tbody>${body}</tbody>`;
-        out.push('<table>\n<thead>\n' + parts.join('') + '</thead>\n' + body + '</table>\n');
+        out.push('</table>\n');
         break;
       }
       default:
