@@ -1863,7 +1863,13 @@ function lexCode(lines, i) {
     break;
   }
   if (lastCode < 0) return null;
-  const text = lines.slice(i, lastCode + 1).map((line) => dropIndent(line, 4)).join('\n');
+  let text = lines.slice(i, lastCode + 1).map((line) => dropIndent(line, 4)).join('\n');
+  // marked's code token keeps the newline ending the last content line,
+  // unless a blank line follows it with more content after that (its
+  // trimTrailingBlankLines drops those). A lone blank final line is
+  // just the source's own trailing newline, which is kept.
+  const after = lastCode + 1;
+  if (after < n && !(blankLine(lines[after]) && after < n - 1)) text += '\n';
   return { text, next: lastCode + 1 };
 }
 
@@ -2135,6 +2141,11 @@ function lexTable(lines, i) {
 // Setext heading at lines[i]. Returns { depth, text, next } or null.
 function lexSetext(lines, i) {
   const first = lines[i];
+  // An empty first line can never head a setext heading (marked's
+  // lheading needs at least one character of text before the
+  // underline); this only arises from the list lazy-line test, where
+  // the previous line's dedented rest may be empty.
+  if (first === '') return null;
   if (setextExcludedFirst(first)) return null;
   const collected = [first];
   let j = i + 1;
@@ -2231,13 +2242,13 @@ function lexPara(lines, i) {
 // --- blockquote ------------------------------------------------------------
 
 // Is the line at `lines[j]` an interrupt for a lazy blockquote
-// continuation (hr, heading, blockquote, fences, list, html, table,
-// blank — no indented code, no setext)?
+// continuation (hr, heading, blockquote, fences, list, html, blank —
+// no indented code, no setext, and no table: marked's blockquote
+// regex lets a table-looking line continue the lazy paragraph).
 function isLazyInterrupt(lines, j) {
   const ln = lines[j];
   return blankLine(ln) || isHr(ln) || isHeadingStart(ln) || isBqLine(ln)
-    || isFenceStart(ln) || isListKe(ln) || isHtmlInterrupt(ln)
-    || isTableStart(lines, j);
+    || isFenceStart(ln) || isListKe(ln) || isHtmlInterrupt(ln);
 }
 
 // Strip one blockquote marker from a line (no-op when there is none).
