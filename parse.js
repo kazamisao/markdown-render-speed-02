@@ -1070,6 +1070,19 @@ function parseBlocks(lines, endsWithNl) {
       if (tip().t === 'item' && tip().kids.length === 0) tip().noContent = true;
       const t = tip();
       if (t.t === 'para') {
+        // A tab-only line inside a table paragraph is a table row (empty
+        // cells), not a blank line: marked keeps the table open and the
+        // next line becomes another row. A spaces-only line, or a tab line
+        // in a non-table paragraph, is a real blank line.
+        let tableRow = false;
+        if (raw.includes('\t') && t.lines.length >= 2) {
+          const aligns = parseDelimRow(t.lines[1]);
+          tableRow = !!aligns && aligns.length === splitTableRow(t.lines[0]).length;
+        }
+        if (tableRow) {
+          t.lines.push(linePrefix + raw.slice(off));
+          continue;
+        }
         closeBlock();
         markBlank();
       } else if (t.t === 'code' || t.t === 'fence') {
