@@ -35,13 +35,14 @@ Practice score: 720/720 cases, deterministic across runs.
 ## Performance
 
 Measured on this machine (Node 22, practice set of 720 cases, parse-only,
-median of 5 runs): **~506 ms vs ~703 ms for marked 18.1.3 — about 1.4x
-faster**. Two `main.ts` runs produce byte-identical `/output/html.json`,
-and the output matches the kit's reference `expected.json` on all 720
-cases. Validation beyond the practice set: 0 divergences from marked on
-20,058 randomized and targeted markdown documents, and a scanner fuzz
-against marked's GFM inline-text regex (40,000 inputs) shows only the
-known benign bare-`http` split difference, which changes no output.
+median of 5 runs): **~740–790 ms vs ~670–770 ms for marked 18.1.3** — roughly
+at parity with marked on this VM, slightly slower on the median run; the
+gap narrowed from ~1.6x slower at the start of round 8 (inline fast path,
+list-regex caching, and cheaper text/URL scanners). Two `main.ts` runs
+produce byte-identical `/output/html.json`, and the output matches the
+kit's reference `expected.json` on all 720 cases. Validation beyond the
+practice set: 0 divergences from marked on 18,038 randomized and targeted
+markdown documents across two seeded fuzz runs.
 
 ## License
 
