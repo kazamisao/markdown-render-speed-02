@@ -1466,27 +1466,143 @@ function scanTagEnd(s, i) {
 // definition labels may not contain one (marked rejects such definitions).
 function findLinkEnd(s, i, noNest) {
   const n = s.length;
-  let depth = 0;
-  let j = i;
+  let j = i + 1;
+  if (noNest) {
+    while (j < n) {
+      const c = s[j];
+      if (c === '\\' && j + 1 < n) {
+        j += 2;
+        continue;
+      }
+      if (c === '[') return -1;
+      if (c === ']') return j;
+      if (c === '\n') {
+        // A newline inside a def label is allowed only when it is not
+        // followed by a blank line.
+        let k = j + 1;
+        while (k < n && (s[k] === ' ' || s[k] === '\t')) k++;
+        if (k >= n || s[k] === '\n') return -1;
+      }
+      j++;
+    }
+    return -1;
+  }
   while (j < n) {
     const c = s[j];
     if (c === '\\' && j + 1 < n) {
       j += 2;
       continue;
     }
+    if (c === '\\') return -1; // trailing lone backslash ends the label
+    if (c === '[') {
+      const end = matchNestedGroup(s, j);
+      if (end < 0) return -1;
+      j = end;
+      continue;
+    }
     if (c === '`') {
       let k = j;
       while (k < n && s[k] === '`') k++;
       const len = k - j;
+      // Code span: consume through the NEXT backtick run (any length).
       let m = k;
-      let found = false;
+      let found = -1;
       while (m < n) {
         if (s[m] === '`') {
           let e = m;
           while (e < n && s[e] === '`') e++;
+          found = e;
+          break;
+        }
+        m++;
+      }
+      if (found > 0) {
+        j = found;
+        continue;
+      }
+      // No closing run: a 2+ backtick run right before ']' is still
+      // consumed (``+(?=\])); anything else ends the label match.
+      if (len >= 2 && s[k] === ']') {
+        j = k;
+        continue;
+      }
+      return -1;
+    }
+    if (c === ']') return j;
+    j++;
+  }
+  return -1;
+}
+
+// Match a nested bracket group starting at s[j] === '[': '[' (Le | escape
+// | any char except []\)*? ']' (lazy: the first ']' not inside a Le group
+// or escape ends it). Returns the index just past the closing ']' or -1.
+function matchNestedGroup(s, j) {
+  const n = s.length;
+  let p = j + 1;
+  while (p < n) {
+    const c = s[p];
+    if (c === ']') return p + 1;
+    if (c === '\\' && p + 1 < n) {
+      p += 2;
+      continue;
+    }
+    if (c === '\\') return -1;
+    if (c === '[') {
+      const le = matchLeGroup(s, p);
+      if (le < 0) return -1;
+      p = le;
+      continue;
+    }
+    p++;
+  }
+  return -1;
+}
+
+// Match Le: '[' (escape | any char except []\)* ']' — no brackets inside.
+function matchLeGroup(s, j) {
+  const n = s.length;
+  let p = j + 1;
+  while (p < n) {
+    const c = s[p];
+    if (c === ']') return p + 1;
+    if (c === '\\' && p + 1 < n) {
+      p += 2;
+      continue;
+    }
+    if (c === '\\' || c === '[') return -1;
+    p++;
+  }
+  return -1;
+}
+
+// marked's Be(): a <...> tag or autolink that starts inside the link text
+// but extends beyond the end of the link text rejects the link. `s` is the
+// full inline string, `linkText` the raw text between the brackets, and
+// `textStart` the index of the link text in `s`. Backslash escapes are
+// skipped and code spans (equal-length runs, like the inline code rule)
+// are skipped whole. An unterminated <!-- matches to the end of the string.
+function linkTextTagOverflow(s, linkText, textStart) {
+  if (!linkText.includes('<')) return false;
+  const n = linkText.length;
+  for (let p = 0; p < n; p++) {
+    const ch = linkText[p];
+    if (ch === '\\') {
+      p++;
+      continue;
+    }
+    if (ch === '`') {
+      let k = p;
+      while (k < n && linkText[k] === '`') k++;
+      const len = k - p;
+      let m = k;
+      let found = -1;
+      while (m < n) {
+        if (linkText[m] === '`') {
+          let e = m;
+          while (e < n && linkText[e] === '`') e++;
           if (e - m === len) {
-            found = true;
-            j = e;
+            found = e;
             break;
           }
           m = e;
@@ -1494,45 +1610,40 @@ function findLinkEnd(s, i, noNest) {
           m++;
         }
       }
-      // An unterminated code span is literal backticks: it does not swallow
-      // the rest of the link text — keep scanning after the opening run.
-      if (!found) j = k;
+      if (found > 0) {
+        p = found - 1;
+        continue;
+      }
       continue;
     }
-    if (c === '<') {
-      // A '<...>' construct swallows its content: a ']' inside an
-      // autolink or an HTML tag does not close the link text. An
-      // unterminated tag (valid tag start, unclosed quote or missing '>')
-      // swallows the rest, so the link text never closes.
-      const am = s.slice(j).match(/^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/);
-      if (am) {
-        j += am[0].length;
-        continue;
-      }
-      const em = s.slice(j).match(
-        /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)>/
-      );
-      if (em) {
-        j += em[0].length;
-        continue;
-      }
-      const te = scanTagEnd(s, j);
-      if (te === -2) return -1;
-      if (te > 0) {
-        j = te;
-        continue;
+    if (ch !== '<') continue;
+    const pos = textStart + p;
+    let mlen = 0;
+    if (s.startsWith('<!--', pos)) {
+      const end = s.indexOf('-->', pos + 4);
+      mlen = end < 0 ? s.length - pos : end + 3 - pos;
+    } else {
+      const h = parseInlineHtml(s, pos);
+      if (h) {
+        mlen = h.next - pos;
+      } else {
+        const am = s.slice(pos).match(/^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/);
+        if (am) {
+          mlen = am[0].length;
+        } else {
+          const em = s.slice(pos).match(
+            /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/
+          );
+          if (em) mlen = em[0].length;
+        }
       }
     }
-    if (c === '[') {
-      if (noNest && depth >= 1) return -1;
-      depth++;
-    } else if (c === ']') {
-      depth--;
-      if (depth === 0) return j;
+    if (mlen > 0) {
+      if (mlen > n - p) return true;
+      p += mlen - 1;
     }
-    j++;
   }
-  return -1;
+  return false;
 }
 
 // Parse an inline link "(...)" starting at s[after] === '('. Returns
@@ -2068,10 +2179,19 @@ function tokenize(s, refs, opts, st) {
     if ((c === '[' && !opts.noLinks) || (c === '!' && s[i + 1] === '[')) {
       const isImage = c === '!';
       const openIdx = isImage ? i + 1 : i;
-      const closeIdx = findLinkEnd(s, openIdx);
+      let closeIdx = findLinkEnd(s, openIdx);
       if (closeIdx < 0) {
-        advance(i + 1);
-        continue;
+        // A shortcut reference label uses marked's `le` grammar (backticks
+        // and nested brackets are plain characters), not the `re` grammar
+        // used by inline and full reference links. Only a shortcut can
+        // match here: an inline '(' or full-ref '[' after the label would
+        // have needed the `re` label, which already failed.
+        const leEnd = findLinkEnd(s, openIdx, true);
+        if (leEnd < 0 || s[leEnd + 1] === '(' || s[leEnd + 1] === '[') {
+          advance(i + 1);
+          continue;
+        }
+        closeIdx = leEnd;
       }
       const linkText = s.slice(openIdx + 1, closeIdx);
       const after = closeIdx + 1;
@@ -2141,6 +2261,12 @@ function tokenize(s, refs, opts, st) {
         dest = def.dest;
         title = def.title;
         next = after;
+      }
+      // marked's Be(): a <...> tag/autolink that starts inside the link
+      // text but extends beyond its end rejects the link (and the image).
+      if (linkTextTagOverflow(s, linkText, openIdx + 1)) {
+        advance(i + 1);
+        continue;
       }
       // A link cannot contain another link: if the link text itself
       // forms a link, the inner one wins and this opener stays literal.
