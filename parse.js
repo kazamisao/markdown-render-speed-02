@@ -1629,22 +1629,17 @@ function trimAutolink(url) {
   return url.slice(0, end);
 }
 
-// Validate the domain part of a GFM extended autolink candidate.
-// Returns the domain string or null.
+// Match the longest valid domain starting at `start` of a GFM extended
+// autolink candidate: labels of alphanumerics with internal hyphens
+// (max 63 chars), separated by dots, ending in a 2+ letter TLD. The
+// remainder of the candidate is the path, which may start with any
+// non-space character — including a backslash (www.foo.com\ links the
+// backslash as part of the URL) or a hyphen. Returns the domain or null.
+const AUTOLINK_DOMAIN_RE =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.[A-Za-z]{2,}/;
 function validAutolinkDomain(url, start) {
-  let end = start;
-  while (end < url.length && !['/', '?', '#'].includes(url[end])) end++;
-  const domain = url.slice(start, end);
-  if (!domain.includes('.')) return null;
-  const labels = domain.split('.');
-  for (const label of labels) {
-    if (label.length === 0 || label.length > 63) return null;
-    if (!/^[A-Za-z0-9-]+$/.test(label)) return null;
-    if (label.startsWith('-') || label.endsWith('-')) return null;
-  }
-  const tld = labels[labels.length - 1];
-  if (!/^[A-Za-z]{2,}$/.test(tld)) return null;
-  return domain;
+  const m = url.slice(start).match(AUTOLINK_DOMAIN_RE);
+  return m ? m[0] : null;
 }
 
 // Resolve emphasis / strikethrough delimiters in a token array.
@@ -1732,8 +1727,8 @@ function tokenize(s, refs, opts) {
   };
   while (i < n) {
     const c = s[i];
-    // GFM extended autolinks: www. and scheme://
-    if (c === 'w' && s.startsWith('www.', i)) {
+    // GFM extended autolinks: www. and scheme:// — never inside link text.
+    if (!opts.noLinks && c === 'w' && s.startsWith('www.', i)) {
       const prev = i === 0 ? '' : s[i - 1];
       if (i === 0 || isWsCh(prev) || '*_~(<'.includes(prev)) {
         let j = i;
@@ -1754,7 +1749,7 @@ function tokenize(s, refs, opts) {
         }
       }
     }
-    if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+    if (!opts.noLinks && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
       const schemeAt = s.indexOf('://', i);
       if (schemeAt > i + 1 && schemeAt - i <= 32) {
         const prev = i === 0 ? '' : s[i - 1];
@@ -1781,7 +1776,7 @@ function tokenize(s, refs, opts) {
         }
       }
     }
-    if (c === '@') {
+    if (!opts.noLinks && c === '@') {
       // GFM email autolink. The local part may contain '_' (and '*', '~'),
       // which tokenize has already emitted as emphasis delimiters: scan back
       // over the raw string, then drop the tokens the local part subsumes.
@@ -2079,7 +2074,11 @@ function tokenize(s, refs, opts) {
       continue;
     }
     if (c === '<') {
-      const am = s.slice(i).match(/^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/);
+      // Autolinks (<scheme:...> and <email>) are suppressed inside link
+      // text; raw HTML tags are still allowed there.
+      const am = !opts.noLinks
+        ? s.slice(i).match(/^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/)
+        : null;
       if (am) {
         const url = am[1];
         flush(i);
@@ -2094,9 +2093,11 @@ function tokenize(s, refs, opts) {
         txtStart = i;
         continue;
       }
-      const em = s.slice(i).match(
-        /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)>/
-      );
+      const em = !opts.noLinks
+        ? s.slice(i).match(
+            /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)>/
+          )
+        : null;
       if (em) {
         const addr = em[1];
         flush(i);
