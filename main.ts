@@ -10,6 +10,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from './parse.js';
 
+// The harness reads its cases from /input and writes /output. The two
+// environment variables are a local-dev convenience only: the graded run
+// always mounts those two directories, so it never sets them.
 const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 

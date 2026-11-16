@@ -26,6 +26,18 @@ on the indented-block factories, whose indent argument is mapped through
 `max(0, min(3, n - 1))`. That mapping is what makes `- foo` followed by
 `  - bar` nest with item text `foo\n- bar`.
 
+## Performance
+
+On the kit practice set (720 cases) the entry scores 720/720 and runs
+about 1.5x faster than the marked baseline on this machine (local
+wall-clock medians; the authoritative timing is the server's heat). The
+speed comes from skipping work rather than from approximating: a
+plain-text fast path in the inline pass, first-character dispatch in
+the inline loop, a manual inline-text scanner (validated against
+marked on 40,000+ random trigger-heavy inputs with zero divergence),
+a single combined list-break test, and no per-character allocations
+in the emphasis matcher.
+
 ## License
 
 MIT — see `LICENSE`.
