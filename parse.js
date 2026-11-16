@@ -1854,10 +1854,49 @@ function tokenize(s, refs, opts) {
         /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/
       );
       if (m) {
-        const addr = m[0];
+        let addr = m[0];
         const afterDomain = s[start + addr.length];
-        // A '-' or '_' right after the domain voids the whole autolink.
-        if (afterDomain !== '-' && afterDomain !== '_') {
+        // marked's email regex ends with the lookahead (?![\w-]): when the
+        // char after the domain is '_' or '-', the regex BACKTRACKS the
+        // domain (dropping trailing '.label' groups) instead of voiding
+        // the link. Exception: a trailing '_' that closes an earlier '_'
+        // emphasis opener links the FULL domain — marked tokenizes the
+        // emphasis inner text separately, so its email regex never sees
+        // the closing '_'.
+        if (afterDomain === '_' || afterDomain === '-') {
+          let keepFull = false;
+          if (afterDomain === '_') {
+            let q = start + addr.length;
+            while (s[q] === '_') q++;
+            const nx = q >= n ? '' : s[q];
+            const nextSpace = q >= n || isWsCh(nx);
+            const nextPunct = q < n && isPunctCh(nx);
+            const leftFlank = !nextSpace && !nextPunct; // prev char is alnum
+            if (!leftFlank || nextPunct) {
+              for (const tk of toks) {
+                if (tk.t === 'delim' && tk.ch === '_' && tk.canOpen) {
+                  keepFull = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (!keepFull) {
+            const atIdx = addr.indexOf('@');
+            while (s[start + addr.length] === '_' || s[start + addr.length] === '-') {
+              const dot = addr.lastIndexOf('.');
+              // The domain must keep at least one '.label' group: if this
+              // is the only dot in the domain, dropping it leaves a
+              // dot-less domain and the whole autolink fails.
+              if (dot <= atIdx || addr.indexOf('.', atIdx + 1) >= dot) {
+                addr = '';
+                break;
+              }
+              addr = addr.slice(0, dot);
+            }
+          }
+        }
+        if (addr) {
           let linkStart = start;
           let text = addr;
           let href = 'mailto:' + addr;
