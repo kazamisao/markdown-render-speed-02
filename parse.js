@@ -1773,28 +1773,87 @@ function tokenize(s, refs, opts) {
       }
     }
     if (c === '@') {
-      // GFM email autolink: scan back for the local part.
+      // GFM email autolink. The local part may contain '_' (and '*', '~'),
+      // which tokenize has already emitted as emphasis delimiters: scan back
+      // over the raw string, then drop the tokens the local part subsumes.
       const LOCAL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?^_`{|}~-";
       let start = i;
-      while (start > txtStart && LOCAL.includes(s[start - 1])) start--;
-      const prev = start === 0 ? '' : s[start - 1];
-      if (start === 0 || isWsCh(prev) || '*_~('.includes(prev)) {
-        const m = s.slice(start).match(
-          /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/
-        );
-        if (m && m[0].length > i - start + 1) {
-          const addr = m[0];
-          flush(start);
-          toks.push({
-            t: 'link',
-            auto: true,
-            href: 'mailto:' + addr,
-            title: null,
-            kids: { toks: [{ t: 'txt', s: addr }], matches: [] },
-          });
-          advance(start + addr.length);
-          txtStart = i;
-          continue;
+      while (start > 0 && LOCAL.includes(s[start - 1])) start--;
+      const m = s.slice(start).match(
+        /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/
+      );
+      if (m) {
+        const addr = m[0];
+        const afterDomain = s[start + addr.length];
+        // A '-' or '_' right after the domain voids the whole autolink.
+        if (afterDomain !== '-' && afterDomain !== '_') {
+          let linkStart = start;
+          let text = addr;
+          let href = 'mailto:' + addr;
+          // Optional scheme prefix immediately before the local part:
+          // "mailto:foo@bar.baz" links the whole thing, href as-is.
+          if (start >= 1 && s[start - 1] === ':') {
+            let p = start - 1;
+            while (p > 0 && start - 1 - p < 33 && /[A-Za-z0-9+.-]/.test(s[p - 1])) p--;
+            const schemeLen = start - 1 - p;
+            const tooLong = p > 0 && /[A-Za-z0-9+.-]/.test(s[p - 1]);
+            if (
+              !tooLong &&
+              schemeLen >= 3 &&
+              schemeLen <= 33 &&
+              /[A-Za-z]/.test(s[p])
+            ) {
+              linkStart = p;
+              text = s.slice(p, start) + addr;
+              href = text;
+              // Path: only with a scheme, exactly one "/segment".
+              const afterAddr = start + addr.length;
+              if (s[afterAddr] === '/') {
+                let j = afterAddr + 1;
+                while (j < n && !isWsCh(s[j]) && s[j] !== '<' && s[j] !== '/') j++;
+                const seg = trimAutolink(s.slice(afterAddr + 1, j));
+                if (seg.length > 0) {
+                  text += '/' + seg;
+                  href += '/' + seg;
+                }
+              }
+            }
+          }
+          const prev = linkStart === 0 ? '' : s[linkStart - 1];
+          if (linkStart === 0 || isWsCh(prev) || '*_~(<'.includes(prev)) {
+            // Drop tokens subsumed by the link span [linkStart, i): any text
+            // token or '_'/'*'/'~' delimiter already emitted for the local
+            // part (a text run can straddle the scheme/local boundary, so
+            // count from linkStart). Text before linkStart is flushed first.
+            flush(linkStart);
+            let need = Math.max(0, txtStart - linkStart);
+            while (need > 0 && toks.length > 0) {
+              const t = toks[toks.length - 1];
+              const len = t.t === 'txt' ? t.s.length : t.t === 'delim' ? t.origLen : 0;
+              if (len === 0) break;
+              if (len <= need) {
+                toks.pop();
+                need -= len;
+              } else if (t.t === 'txt') {
+                // A text token straddling the local-part start: keep its
+                // prefix (before start) and drop the rest.
+                t.s = t.s.slice(0, t.s.length - need);
+                need = 0;
+              } else {
+                break;
+              }
+            }
+            toks.push({
+              t: 'link',
+              auto: true,
+              href,
+              title: null,
+              kids: { toks: [{ t: 'txt', s: text }], matches: [] },
+            });
+            advance(linkStart + text.length);
+            txtStart = i;
+            continue;
+          }
         }
       }
     }
