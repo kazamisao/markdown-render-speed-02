@@ -837,6 +837,49 @@ function parseBlocks(lines, endsWithNl) {
     // innermost recorded one that still contains the insertion point.
     blankIn = { lists: stack.filter((n) => n.t === 'list') };
   }
+  // Is the line still inside every block quote between the list item at
+  // stack index itemIdx and the open fenced code block? The line is given
+  // as restI (starting at visual column startCol); the item indent is
+  // stripped best-effort first. Used to decide whether a fence absorbs a
+  // line that is not indented far enough for its list item.
+  function lineMatchesQuotes(itemIdx, restI, startCol, indent) {
+    let k = 0;
+    let c = startCol;
+    const target = startCol + indent;
+    while (k < restI.length && c < target && (restI[k] === ' ' || restI[k] === '\t')) {
+      c += restI[k] === '\t' ? 4 - (c % 4) : 1;
+      k++;
+    }
+    let extra = 0;
+    if (c > target) {
+      extra = c - target;
+      c = target;
+    }
+    let cur = ' '.repeat(extra) + restI.slice(k);
+    let curCol = c;
+    for (let q = itemIdx + 1; q < stack.length; q++) {
+      const nq = stack[q];
+      if (nq.t === 'list') continue;
+      if (nq.t !== 'quote') return true;
+      const lw = leadWs(cur, curCol);
+      if (lw.cols > 3 || lw.idx >= cur.length || cur[lw.idx] !== '>') return false;
+      let r = lw.idx + 1;
+      let adv = 1;
+      let ex = '';
+      if (cur[r] === ' ') {
+        r++;
+        adv++;
+      } else if (cur[r] === '\t') {
+        const w = 4 - ((curCol + lw.cols + 1) % 4);
+        if (w > 1) ex = ' '.repeat(w - 1);
+        r++;
+        adv++;
+      }
+      cur = ex + cur.slice(r);
+      curCol = curCol + lw.cols + adv;
+    }
+    return true;
+  }
   function htmlText(node, topLevel) {
     // An HTML block's text is its lines joined by newlines. A trailing
     // newline is added when the block is followed by another block on the
@@ -973,9 +1016,12 @@ function parseBlocks(lines, endsWithNl) {
         const restI = linePrefix + raw.slice(off);
         const lwI = leadWs(restI, col);
         if (lwI.cols < node.indent) {
-          // Same as for a block quote: an open fenced code block absorbs
-          // the line even when it is not indented far enough for the item.
-          if (tip().t === 'fence') break;
+          // An open fenced code block absorbs the line even when it is
+          // not indented far enough for the item — but only while the
+          // line is still inside every block quote between this item and
+          // the fence. A line without the quote marker closes the quote
+          // (and the fence with it).
+          if (tip().t === 'fence' && lineMatchesQuotes(j, restI, col, node.indent)) break;
           failAt = j;
           break;
         }
@@ -1055,8 +1101,23 @@ function parseBlocks(lines, endsWithNl) {
           }
         }
         if (!interrupts) {
-          // A lazy continuation line loses its leading whitespace.
-          tip().lines.push(body0);
+          // A lazy continuation line loses its leading spaces — but a
+          // leading tab expands to spaces up to the next tab stop and
+          // those spaces are kept in the paragraph text.
+          let li = 0;
+          let lcol = col - linePrefix.length;
+          let expanded = '';
+          while (li < rest0.length && (rest0[li] === ' ' || rest0[li] === '\t')) {
+            if (rest0[li] === '\t') {
+              const w = 4 - (lcol % 4);
+              expanded += ' '.repeat(w);
+              lcol += w;
+            } else {
+              lcol += 1;
+            }
+            li++;
+          }
+          tip().lines.push(expanded + rest0.slice(li));
           if (blankIn) blankIn = null;
           continue;
         }
@@ -1165,8 +1226,10 @@ function parseBlocks(lines, endsWithNl) {
       }
       if (rest.trim() === '') {
         // Only spaces are left: they belong to an open paragraph as a line
-        // of spaces, otherwise the line is ignored.
-        if (t.t === 'para') t.lines.push(rest);
+        // of spaces, otherwise the line is ignored. A leading tab expands
+        // to spaces up to the next tab stop (lw.cols is already the
+        // expanded width).
+        if (t.t === 'para') t.lines.push(' '.repeat(lw.cols) + body);
         break;
       }
       if (ind <= 3 && body[0] === '>') {
@@ -1324,11 +1387,13 @@ function parseBlocks(lines, endsWithNl) {
         }
         break;
       }
-      // Default: paragraph.
+      // Default: paragraph. A leading tab expands to spaces up to the
+      // next tab stop (lw.cols is already the expanded width); leading
+      // spaces on continuation lines are kept.
       if (tip().t !== 'para') {
         openNode({ t: 'para', lines: [] });
       }
-      tip().lines.push(rest);
+      tip().lines.push(' '.repeat(lw.cols) + body);
       break;
     }
     if (blankIn) blankIn = null;
@@ -1429,7 +1494,9 @@ function findLinkEnd(s, i, noNest) {
           m++;
         }
       }
-      if (!found) return -1;
+      // An unterminated code span is literal backticks: it does not swallow
+      // the rest of the link text — keep scanning after the opening run.
+      if (!found) j = k;
       continue;
     }
     if (c === '<') {
