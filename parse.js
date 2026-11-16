@@ -1772,9 +1772,13 @@ function resolveEmphasis(toks) {
   return matches;
 }
 
-// Tokenize one inline string. Returns {toks, matches}.
-function tokenize(s, refs, opts) {
+// Tokenize one inline string. Returns {toks, matches}. `st` is the
+// shared per-parse inline state ({inLink}): marked's Lexer.state.inLink
+// is never reset between inline tokenizations, so an unclosed <a> tag
+// suppresses extended autolinks in all following text until </a>.
+function tokenize(s, refs, opts, st) {
   opts = opts || {};
+  st = st || { inLink: false };
   const n = s.length;
   const toks = [];
   let i = 0;
@@ -1794,8 +1798,9 @@ function tokenize(s, refs, opts) {
   };
   while (i < n) {
     const c = s[i];
-    // GFM extended autolinks: www. and scheme:// — never inside link text.
-    if (!opts.noLinks && c === 'w' && s.startsWith('www.', i)) {
+    // GFM extended autolinks: www. and scheme:// — never inside link text
+    // (marked's url rule runs only when !state.inLink).
+    if (!opts.noLinks && !st.inLink && c === 'w' && s.startsWith('www.', i)) {
       const prev = i === 0 ? '' : s[i - 1];
       if (i === 0 || isWsCh(prev) || '*_~(<'.includes(prev)) {
         let j = i;
@@ -1816,7 +1821,7 @@ function tokenize(s, refs, opts) {
         }
       }
     }
-    if (!opts.noLinks && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+    if (!opts.noLinks && !st.inLink && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
       const schemeAt = s.indexOf('://', i);
       if (schemeAt > i + 1 && schemeAt - i <= 32) {
         const prev = i === 0 ? '' : s[i - 1];
@@ -1843,7 +1848,7 @@ function tokenize(s, refs, opts) {
         }
       }
     }
-    if (!opts.noLinks && c === '@') {
+    if (!opts.noLinks && !st.inLink && c === '@') {
       // GFM email autolink. The local part may contain '_' (and '*', '~'),
       // which tokenize has already emitted as emphasis delimiters: scan back
       // over the raw string, then drop the tokens the local part subsumes.
@@ -2163,16 +2168,21 @@ function tokenize(s, refs, opts) {
       // A link cannot contain another link: if the link text itself
       // forms a link, the inner one wins and this opener stays literal.
       // (An image may contain a link in its alt text, which is flattened.)
-      if (!isImage && textHasLink(linkText, refs)) {
+      if (!isImage && textHasLink(linkText, refs, st)) {
         advance(i + 1);
         continue;
       }
       flush(i);
       if (isImage) {
-        const alt = flattenAlt(linkText, refs);
+        const alt = flattenAlt(linkText, refs, st);
         toks.push({ t: 'img', src: dest, title, alt });
       } else {
-        const kids = tokenize(linkText, refs, { noLinks: true });
+        // marked's De() tokenizes link text with inLink=true and restores
+        // the state afterwards, so a tag inside the text cannot leak out.
+        const savedInLink = st.inLink;
+        st.inLink = true;
+        const kids = tokenize(linkText, refs, { noLinks: true }, st);
+        st.inLink = savedInLink;
         toks.push({ t: 'link', href: dest, title, kids });
       }
       advance(next);
@@ -2216,6 +2226,12 @@ function tokenize(s, refs, opts) {
       }
       const h = parseInlineHtml(s, i);
       if (h) {
+        // marked's tag rule: '<a ' (literal space) opens inLink, '</a>'
+        // closes it — only when the state actually changes. A bare '<a>'
+        // does not set inLink. Block-level HTML never reaches this branch.
+        const tagText = h.token.s;
+        if (!st.inLink && /^<a /i.test(tagText)) st.inLink = true;
+        else if (st.inLink && /^<\/a>/i.test(tagText)) st.inLink = false;
         flush(i);
         toks.push(h.token);
         advance(h.next);
@@ -2266,17 +2282,28 @@ function flattenTokens(toks, matches) {
   return out;
 }
 
-function flattenAlt(text, refs) {
-  const parsed = tokenize(text, refs, {});
+function flattenAlt(text, refs, st) {
+  // marked's De() tokenizes image text with inLink=true (restored after),
+  // so extended autolinks are suppressed and tags cannot leak state.
+  const savedInLink = st ? st.inLink : false;
+  if (st) st.inLink = true;
+  const parsed = tokenize(text, refs, {}, st);
+  if (st) st.inLink = savedInLink;
   return flattenTokens(parsed.toks, parsed.matches);
 }
 
 // Whether the text forms a link when parsed (used to let the innermost
-// link win: a link cannot contain another link).
-function textHasLink(text, refs) {
+// link win: a link cannot contain another link). Tokenized with inLink
+// true (like marked's De()): only inline/reflink links count — core
+// <...> autolinks nest and never void the outer link, and extended
+// autolinks cannot be emitted inside link text at all.
+function textHasLink(text, refs, st) {
   if (!text.includes('[')) return false;
-  const parsed = tokenize(text, refs, {});
-  return parsed.toks.some((tk) => tk.t === 'link');
+  const savedInLink = st ? st.inLink : false;
+  if (st) st.inLink = true;
+  const parsed = tokenize(text, refs, {}, st);
+  if (st) st.inLink = savedInLink;
+  return parsed.toks.some((tk) => tk.t === 'link' && !tk.auto);
 }
 
 
@@ -2358,20 +2385,20 @@ function renderTokens(toks, matches) {
   return out;
 }
 
-function inlineToHtml(text, refs) {
+function inlineToHtml(text, refs, st) {
   if (!text) return '';
-  const parsed = tokenize(text, refs, {});
+  const parsed = tokenize(text, refs, {}, st);
   return renderTokens(parsed.toks, parsed.matches);
 }
 
 // Render one block node (recursively) to HTML.
-function renderBlock(node, refs, out) {
+function renderBlock(node, refs, out, st) {
   switch (node.t) {
     case 'doc':
-      for (const kid of node.kids) renderBlock(kid, refs, out);
+      for (const kid of node.kids) renderBlock(kid, refs, out, st);
       break;
     case 'para': {
-      let html = inlineToHtml(node.text, refs);
+      let html = inlineToHtml(node.text, refs, st);
       if (node.task) {
         const input =
           node.task === 'x'
@@ -2383,7 +2410,7 @@ function renderBlock(node, refs, out) {
       break;
     }
     case 'head':
-      out.push('<h' + node.level + '>' + inlineToHtml(node.text, refs) + '</h' + node.level + '>\n');
+      out.push('<h' + node.level + '>' + inlineToHtml(node.text, refs, st) + '</h' + node.level + '>\n');
       break;
     case 'code':
       out.push('<pre><code>' + escCode(node.text) + '</code></pre>\n');
@@ -2405,14 +2432,14 @@ function renderBlock(node, refs, out) {
       break;
     case 'quote':
       out.push('<blockquote>\n');
-      for (const kid of node.kids) renderBlock(kid, refs, out);
+      for (const kid of node.kids) renderBlock(kid, refs, out, st);
       out.push('</blockquote>\n');
       break;
     case 'list': {
       const tag = node.ordered ? 'ol' : 'ul';
       const startAttr = node.ordered && node.start !== 1 ? ' start="' + node.start + '"' : '';
       out.push('<' + tag + startAttr + '>\n');
-      for (const item of node.kids) renderItem(item, node, refs, out);
+      for (const item of node.kids) renderItem(item, node, refs, out, st);
       out.push('</' + tag + '>\n');
       break;
     }
@@ -2421,7 +2448,7 @@ function renderBlock(node, refs, out) {
   }
 }
 
-function renderItem(item, list, refs, out) {
+function renderItem(item, list, refs, out, st) {
   // A task marker is rendered at the start of the item's first paragraph;
   // if the item has no paragraph at all, it stands alone.
   let firstPara = null;
@@ -2448,7 +2475,7 @@ function renderItem(item, list, refs, out) {
     // Tight list: paragraphs render without <p> wrappers.
     for (const kid of item.kids) {
       if (kid.t === 'para') {
-        let html = inlineToHtml(kid.text, refs);
+        let html = inlineToHtml(kid.text, refs, st);
         if (kid.task) {
           html =
             (kid.task === 'x'
@@ -2457,26 +2484,26 @@ function renderItem(item, list, refs, out) {
         }
         out.push(html);
       } else if (kid.t === 'table') {
-        renderTable(kid, refs, out);
+        renderTable(kid, refs, out, st);
       } else {
-        renderBlock(kid, refs, out);
+        renderBlock(kid, refs, out, st);
       }
     }
   } else {
     for (const kid of item.kids) {
-      if (kid.t === 'table') renderTable(kid, refs, out);
-      else renderBlock(kid, refs, out);
+      if (kid.t === 'table') renderTable(kid, refs, out, st);
+      else renderBlock(kid, refs, out, st);
     }
   }
   out.push('</li>\n');
 }
 
-function renderTable(node, refs, out) {
+function renderTable(node, refs, out, st) {
   out.push('<table>\n<thead>\n<tr>\n');
   for (let c = 0; c < node.header.length; c++) {
     const a = node.aligns[c];
     out.push(
-      '<th' + (a ? ' align="' + a + '"' : '') + '>' + inlineToHtml(node.header[c], refs) + '</th>\n'
+      '<th' + (a ? ' align="' + a + '"' : '') + '>' + inlineToHtml(node.header[c], refs, st) + '</th>\n'
     );
   }
   out.push('</tr>\n</thead>\n');
@@ -2489,7 +2516,7 @@ function renderTable(node, refs, out) {
       for (let c = 0; c < row.length; c++) {
         const a = node.aligns[c];
         out.push(
-          '<td' + (a ? ' align="' + a + '"' : '') + '>' + inlineToHtml(row[c], refs) + '</td>\n'
+          '<td' + (a ? ' align="' + a + '"' : '') + '>' + inlineToHtml(row[c], refs, st) + '</td>\n'
         );
       }
       out.push('</tr>\n');
@@ -2509,9 +2536,12 @@ export function parse(markdown) {
   if (endsWithNl) lines.pop();
   const { root, refs } = parseBlocks(lines, endsWithNl);
   const out = [];
+  // Shared inline state for the whole document (marked's Lexer.state):
+  // inLink persists across blocks until a closing </a> tag.
+  const st = { inLink: false };
   for (const kid of root.kids) {
-    if (kid.t === 'table') renderTable(kid, refs, out);
-    else renderBlock(kid, refs, out);
+    if (kid.t === 'table') renderTable(kid, refs, out, st);
+    else renderBlock(kid, refs, out, st);
   }
   return out.join('');
 }
