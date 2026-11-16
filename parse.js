@@ -1144,9 +1144,12 @@ function isAlnumCode(c) {
   return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 }
 
+// True when c may precede a www. autolink: whitespace (the full JS \s
+// set, including NBSP and other Unicode spaces, as in marked's
+// (?<![^\s*_~(]) lookbehind), '*', '_', '~' or '('.
+const WS_RE = /\s/;
 function isWsOrWwwPrev(c) {
-  return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v'
-    || c === '*' || c === '_' || c === '~' || c === '(';
+  return c === '*' || c === '_' || c === '~' || c === '(' || WS_RE.test(c);
 }
 
 function scanTextLen(s) {
@@ -1175,14 +1178,20 @@ function scanTextLen(s) {
   let m = SPECIAL_RE.exec(s);
   if (m) stop = m.index;
 
-  // Protocol:// — only when '://' occurs at all. The protocol must start
-  // four (http, ftp) or five (https) characters before the slashes.
+  // Protocol:// — only when '://' occurs at all. The protocol starts
+  // three (ftp), four (http) or five (https) characters before the
+  // slashes. The stop is the protocol start, which can lie before the
+  // current stop even when the '://' itself lies after it.
   let p = s.indexOf('://', firstLen);
-  while (p !== -1 && p < stop) {
-    const lower4 = s.slice(p - 4, p).toLowerCase();
-    const lower5 = s.slice(p - 5, p).toLowerCase();
-    if (p - 4 >= firstLen && (lower4 === 'http' || lower4 === 'ftp')) { stop = p - 4; break; }
-    if (p - 5 >= firstLen && lower5 === 'https') { stop = p - 5; break; }
+  while (p !== -1) {
+    let j = -1;
+    if (p - 4 >= firstLen && s.slice(p - 4, p).toLowerCase() === 'http') j = p - 4;
+    else if (p - 3 >= firstLen && s.slice(p - 3, p).toLowerCase() === 'ftp') j = p - 3;
+    else if (p - 5 >= firstLen && s.slice(p - 5, p).toLowerCase() === 'https') j = p - 5;
+    if (j !== -1) {
+      if (j < stop) stop = j;
+      break; // later '://' occurrences can only start further right
+    }
     p = s.indexOf('://', p + 1);
   }
 
@@ -1197,13 +1206,17 @@ function scanTextLen(s) {
 
   // Email-like run — only when '@' occurs at all. For each '@', walk back
   // over the email characters before it; the run's start (clamped to the
-  // first unconsumed position) is where the text stops.
+  // first unconsumed position) is where the text stops. The '@' itself
+  // can lie after the current stop while the run still starts before it.
   let at = s.indexOf('@', firstLen);
-  while (at !== -1 && at < stop) {
+  while (at !== -1) {
     let runStart = at;
     while (runStart > 0 && isEmailCharCode(s.charCodeAt(runStart - 1))) runStart--;
     if (runStart < firstLen) runStart = firstLen;
-    if (runStart < at && runStart < stop) { stop = runStart; break; }
+    if (runStart < at) {
+      if (runStart < stop) stop = runStart;
+      break; // the run start only moves right for later '@'s
+    }
     at = s.indexOf('@', at + 1);
   }
 
@@ -1219,12 +1232,15 @@ function scanTextLen(s) {
   }
 
   // Two or more spaces followed by a newline — only when '  \n' occurs.
-  // The run starts where the spaces before that occurrence begin.
+  // The run starts where the spaces before that occurrence begin. When
+  // the run starts at or before the first unconsumed position, the
+  // text stops there: the characters from firstLen on are two or more
+  // spaces followed by a newline.
   const hb = s.indexOf('  \n', firstLen);
   if (hb !== -1) {
     let k = hb;
     while (k > 0 && s[k - 1] === ' ') k--;
-    if (k === firstLen) {
+    if (k <= firstLen) {
       if (firstLen < stop) stop = firstLen;
     } else if (k > firstLen && s[k - 1] !== ' ' && k < stop) {
       stop = k;
@@ -1325,6 +1341,14 @@ function inlineRun(ctx, src, out, plain = false) {
       if (em) {
         out.push(em.html);
         consumed = em.len;
+      } else if (ch === '_' && !ctx.inLink) {
+        // An email address may start with '_' — in marked's order the url
+        // rule runs after emphasis, so try it when emphasis fails.
+        const url = tryUrl(ctx, s);
+        if (url) {
+          out.push(plain ? url.text : url.html);
+          consumed = url.len;
+        }
       }
     } else if (ch === '`') {
       const code = tryCodespan(s);
