@@ -1,49 +1,39 @@
-[![make.fun](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/c/markdown-render-speed-02)
-[![rank](https://make.fun/badge/markdown-render-speed-02/kazamisao/markdown-render-speed-02/rank.svg)](https://make.fun/c/markdown-render-speed-02)
-[![reward](https://make.fun/badge/markdown-render-speed-02/kazamisao/markdown-render-speed-02/reward.svg)](https://make.fun/c/markdown-render-speed-02)
+# Make Markdown rendering faster — round 13 blind rewrite
 
-# markdown-render-speed-02
+A dependency-free, from-scratch CommonMark 0.31.2 + GFM renderer that returns
+exactly the HTML marked 18.1.3 renders with its default options, written to be
+faster than marked itself.
 
-A fast, dependency-free drop-in replacement for marked 18.1.3 (default
-options: GFM on, breaks off, pedantic off). `parse(markdown)` returns
-exactly the HTML `marked.parse(markdown)` returns — every spec example and
-every generated document in the practice set renders byte-identical.
+- `parse.js` — the renderer. `parse(markdown)` returns the HTML string.
+  Single pass over blocks, then inline parsing per leaf block with a
+  delimiter-stack emphasis algorithm. No dependencies, no caching across
+  calls, no network, no clock reads.
+- `main.ts` — the harness driver: reads `/input/cases.json`, renders every
+  case with `parse`, writes `/output/html.json`.
 
-## Layout
+## Design notes
 
-- `parse.js` — the renderer. A two-phase design: the block pass walks the
-  source once, builds a small tree of block nodes and collects link
-  reference definitions; the render pass walks the tree and runs the inline
-  parser on each text. Inline rendering writes strings straight into an
-  output array — no token objects on the hot path. Speed comes from
-  plain-text fast paths, first-character dispatch, a manual text scanner,
-  and the masked-source technique for emphasis, strong emphasis and
-  strikethrough closers.
-- `main.ts` — the harness entrypoint: reads `/input/cases.json`, renders
-  every case with `parse`, writes `/output/html.json`.
+Block parsing works on raw lines with visual-column indentation (tabs advance
+to the next multiple of four), so indented and fenced code keep their literal
+tabs while structure sees expanded columns. Link reference definitions are
+collected during the block pass and resolve document-wide, as marked does.
 
-## Local grade
+Inline parsing scans each leaf once: code spans, links and images, autolinks,
+raw HTML, entities and backslash escapes are recognised inline, and emphasis
+(including GFM strikethrough) is resolved afterwards with the standard
+delimiter-stack algorithm, including the odd-match rule for underscores.
 
-From the unpacked kit directory:
+Plain-text runs take a fast path: a leaf with no special characters is
+escaped and emitted without any token work.
 
-```sh
-node cli/makefun.mjs grade-local --kit . --bot <path to this repository> --driver docker
+## Verification
+
+Grade locally with the kit CLI:
+
+```
+node cli/makefun.mjs grade-local --kit . --bot <repo> --driver process
 ```
 
-Practice score: 720/720 cases, deterministic across runs.
-
-## Performance
-
-Measured on this machine (Node 22, practice set of 720 cases, parse-only,
-median of 5 runs): **~740–790 ms vs ~670–770 ms for marked 18.1.3** — roughly
-at parity with marked on this VM, slightly slower on the median run; the
-gap narrowed from ~1.6x slower at the start of round 8 (inline fast path,
-list-regex caching, and cheaper text/URL scanners). Two `main.ts` runs
-produce byte-identical `/output/html.json`, and the output matches the
-kit's reference `expected.json` on all 720 cases. Validation beyond the
-practice set: 0 divergences from marked on 18,038 randomized and targeted
-markdown documents across two seeded fuzz runs.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+Practice set: 720 cases (680 CommonMark + GFM spec examples, 40 generated
+READMEs). Target: 720/720, zero differential-fuzz mismatches against marked,
+and a median speedup of at least 1.2x.
