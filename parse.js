@@ -1261,6 +1261,46 @@ function isWsCh(ch) {
   );
 }
 
+// Scan an HTML tag starting at s[i] === '<'. Returns the index just after
+// the tag, -1 when it is not a tag, or -2 when the tag is unterminated (a
+// valid tag start that runs off the end of the string, e.g. an unclosed
+// quote: a ']' after it is inside the tag and does not close link text).
+function scanTagEnd(s, i) {
+  const n = s.length;
+  let j = i + 1;
+  let closing = false;
+  if (s[j] === '/') {
+    closing = true;
+    j++;
+  }
+  if (j >= n || !/[A-Za-z]/.test(s[j])) return -1;
+  while (j < n && /[A-Za-z0-9-]/.test(s[j])) j++;
+  while (true) {
+    while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
+    if (j >= n) return -2;
+    if (s[j] === '>') return j + 1;
+    if (s[j] === '/' && s[j + 1] === '>') return j + 2;
+    if (closing) return -1;
+    if (!/[A-Za-z_:]/.test(s[j])) return -1;
+    while (j < n && /[A-Za-z0-9_.:-]/.test(s[j])) j++;
+    while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
+    if (s[j] === '=') {
+      j++;
+      while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
+      if (s[j] === '"' || s[j] === "'") {
+        const q = s[j];
+        j++;
+        while (j < n && s[j] !== q) j++;
+        if (j >= n) return -2;
+        j++;
+      } else {
+        if (j >= n || /[\s"'=<>`]/.test(s[j])) return -1;
+        while (j < n && !/[\s"'=<>`]/.test(s[j])) j++;
+      }
+    }
+  }
+}
+
 // Find the index of the ']' matching the '[' at s[i]. Returns -1.
 function findLinkEnd(s, i) {
   const n = s.length;
@@ -1294,6 +1334,30 @@ function findLinkEnd(s, i) {
       }
       if (!found) return -1;
       continue;
+    }
+    if (c === '<') {
+      // A '<...>' construct swallows its content: a ']' inside an
+      // autolink or an HTML tag does not close the link text. An
+      // unterminated tag (valid tag start, unclosed quote or missing '>')
+      // swallows the rest, so the link text never closes.
+      const am = s.slice(j).match(/^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/);
+      if (am) {
+        j += am[0].length;
+        continue;
+      }
+      const em = s.slice(j).match(
+        /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)>/
+      );
+      if (em) {
+        j += em[0].length;
+        continue;
+      }
+      const te = scanTagEnd(s, j);
+      if (te === -2) return -1;
+      if (te > 0) {
+        j = te;
+        continue;
+      }
     }
     if (c === '[') depth++;
     else if (c === ']') {
