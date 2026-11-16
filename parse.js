@@ -1657,43 +1657,20 @@ function parseInlineHtml(s, i) {
   return { token: { t: 'html', s: s.slice(i, j) }, next: j };
 }
 
-// Trim trailing punctuation off a GFM extended autolink candidate.
+// marked's _backpedal, applied repeatedly until stable (the url rule):
+// the longest prefix built from non-punctuation runs, balanced (...) groups,
+// a bare & (not starting an entity), and punctuation runs that do not reach
+// the end of the string. It trims trailing punctuation, drops a trailing
+// '(' with no matching ')', and cuts the candidate at any unmatched '('.
+const BACKPEDAL_RE =
+  /(?:[^?!.,:;*_'\"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'\"~)]+(?!$))+/;
 function trimAutolink(url) {
-  let end = url.length;
-  // A trailing entity reference is not part of the link.
-  if (end > 0 && url[end - 1] === ';') {
-    const amp = url.lastIndexOf('&', end - 1);
-    if (amp >= 0) {
-      const body = url.slice(amp + 1, end - 1);
-      if (/^#[0-9]+$/.test(body) || /^#[xX][0-9a-fA-F]+$/.test(body) || /^[A-Za-z][A-Za-z0-9_]*$/.test(body)) {
-        end = amp;
-      }
-    }
-  }
-  const PUNCT = '?!.,:;*_~\'"';
-  let changed = true;
-  while (changed) {
-    changed = false;
-    while (end > 0 && PUNCT.includes(url[end - 1])) {
-      end--;
-      changed = true;
-    }
-    while (end > 0 && url[end - 1] === ')') {
-      let open = 0;
-      let close = 0;
-      for (let k = 0; k < end; k++) {
-        if (url[k] === '(') open++;
-        else if (url[k] === ')') close++;
-      }
-      if (close > open) {
-        end--;
-        changed = true;
-      } else {
-        break;
-      }
-    }
-  }
-  return url.slice(0, end);
+  let prev;
+  do {
+    prev = url;
+    url = BACKPEDAL_RE.exec(url)?.[0] ?? '';
+  } while (prev !== url);
+  return url;
 }
 
 // Match the longest valid domain starting at `start` of a GFM extended
