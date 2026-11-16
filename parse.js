@@ -2074,11 +2074,9 @@ function tokenize(s, refs, opts) {
       continue;
     }
     if (c === '<') {
-      // Autolinks (<scheme:...> and <email>) are suppressed inside link
-      // text; raw HTML tags are still allowed there.
-      const am = !opts.noLinks
-        ? s.slice(i).match(/^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/)
-        : null;
+      // Core <...> autolinks are NOT suppressed inside link text (marked
+      // nests them); only the GFM extended autolinks are suppressed there.
+      const am = s.slice(i).match(/^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/);
       if (am) {
         const url = am[1];
         flush(i);
@@ -2093,11 +2091,9 @@ function tokenize(s, refs, opts) {
         txtStart = i;
         continue;
       }
-      const em = !opts.noLinks
-        ? s.slice(i).match(
-            /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)>/
-          )
-        : null;
+      const em = s.slice(i).match(
+        /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)>/
+      );
       if (em) {
         const addr = em[1];
         flush(i);
