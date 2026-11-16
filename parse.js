@@ -819,27 +819,23 @@ function parseBlocks(lines, endsWithNl) {
   }
   function checkLoose() {
     if (!blankIn) return;
-    // A blank line makes a list loose when the next block is added to an
-    // item that contains the blank line: the item the block is added to,
-    // or an ancestor of the item the blank line was seen in.
+    // A blank line loosens the list that contains the insertion point:
+    // the parent list of the innermost item still open. A list whose item
+    // was already closed (a dangling list on the stack, or a list closed
+    // before this block) does not contain the insertion point, so a
+    // trailing blank after a list loosens nothing.
     for (let j = stack.length - 1; j >= 1; j--) {
-      if (stack[j].t === 'item') {
-        const idxB = stack.indexOf(blankIn.item);
-        if (idxB >= 0 && j <= idxB && stack[j - 1].t === 'list') {
-          stack[j - 1].tight = false;
-          blankIn = null;
-        }
-        return;
+      if (stack[j].t === 'item' && stack[j - 1].t === 'list') {
+        if (blankIn.lists.includes(stack[j - 1])) stack[j - 1].tight = false;
+        break;
       }
     }
+    blankIn = null;
   }
   function markBlank() {
-    for (let j = stack.length - 1; j >= 1; j--) {
-      if (stack[j].t === 'item') {
-        blankIn = { list: stack[j - 1], item: stack[j] };
-        return;
-      }
-    }
+    // Record every list still open: the block after the blank loosens the
+    // innermost recorded one that still contains the insertion point.
+    blankIn = { lists: stack.filter((n) => n.t === 'list') };
   }
   function htmlText(node, topLevel) {
     // An HTML block's text is its lines joined by newlines. A trailing
@@ -1275,7 +1271,7 @@ function parseBlocks(lines, endsWithNl) {
               addNode(listNode);
               stack.push(listNode);
             }
-            if (blankIn && blankIn.list === listNode) {
+            if (blankIn && blankIn.lists.includes(listNode)) {
               listNode.tight = false;
               blankIn = null;
             }
