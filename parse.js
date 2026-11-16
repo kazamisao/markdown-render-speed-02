@@ -1306,37 +1306,26 @@ function findLinkEnd(s, i) {
 }
 
 // Parse an inline link "(...)" starting at s[after] === '('. Returns
-// {dest, title, next} or null.
+// {dest, title, next} or null. The destination is always parsed first: a
+// bare destination may start with a quote or paren character, so a leading
+// " or ' or ( is part of the destination, not a title (cm-504).
 function tryInlineLink(s, after) {
   let pos = skipWs(s, after + 1);
-  let dest = '';
-  let title = null;
-  const ch = s[pos];
-  if (ch === '"' || ch === "'" || ch === '(') {
+  const destRes = parseLinkDest(s, pos);
+  if (!destRes) return null;
+  const dest = destRes.dest;
+  pos = destRes.next;
+  pos = skipWs(s, pos);
+  if (pos < s.length && s[pos] === ')') return { dest, title: null, next: pos + 1 };
+  if (pos < s.length && (s[pos] === '"' || s[pos] === "'" || s[pos] === '(')) {
     const t = parseLinkTitle(s, pos);
     if (!t) return null;
-    title = t.title;
-    pos = t.next;
-  } else {
-    const destRes = parseLinkDest(s, pos);
-    if (!destRes) return null;
-    dest = destRes.dest;
-    pos = destRes.next;
-    const save = pos;
-    pos = skipWs(s, pos);
-    if (pos < s.length && s[pos] === ')') return { dest, title: null, next: pos + 1 };
-    if (pos < s.length && (s[pos] === '"' || s[pos] === "'" || s[pos] === '(')) {
-      const t = parseLinkTitle(s, pos);
-      if (!t) return null;
-      title = t.title;
-      pos = t.next;
-    } else {
-      return null;
-    }
+    const title = t.title;
+    pos = skipWs(s, t.next);
+    if (pos >= s.length || s[pos] !== ')') return null;
+    return { dest, title, next: pos + 1 };
   }
-  pos = skipWs(s, pos);
-  if (pos >= s.length || s[pos] !== ')') return null;
-  return { dest, title, next: pos + 1 };
+  return null;
 }
 
 // Remove backslash escapes before ASCII punctuation.
@@ -1499,7 +1488,7 @@ function resolveEmphasis(toks) {
   for (let di = 0; di < delims.length; di++) {
     const idx = delims[di];
     const d = toks[idx];
-    if (d.canClose && d.len > 0 && !(d.ch === '~' && d.len < 2)) {
+    if (d.canClose && d.len > 0) {
       while (d.len > 0) {
         const floor = bottom.get(d.ch) || 0;
         let oi = -1;
@@ -1509,7 +1498,6 @@ function resolveEmphasis(toks) {
           if (oDelimPos < floor) break;
           const o = toks[oIdx];
           if (o.ch !== d.ch) continue;
-          if (d.ch === '~' && o.len < 2) continue;
           // An opener inside an emphasis that was already created cannot
           // be used by a closer outside that emphasis: the match would
           // cross the existing emphasis boundary.
@@ -1537,10 +1525,6 @@ function resolveEmphasis(toks) {
         }
         const oIdx = openers[oi];
         const o = toks[oIdx];
-        if (d.ch === '~' && (o.len < 2 || d.len < 2)) {
-          bottom.set(d.ch, di + 1);
-          break;
-        }
         const use = o.len >= 2 && d.len >= 2 ? 2 : 1;
         const kind = d.ch === '~' ? 'del' : use === 2 ? 'strong' : 'em';
         matches.push({ open: oIdx, close: idx, use, kind });
@@ -1770,10 +1754,6 @@ function tokenize(s, refs, opts) {
         continue;
       }
       const linkText = s.slice(openIdx + 1, closeIdx);
-      if (!isImage && linkText.length === 0) {
-        advance(i + 1);
-        continue;
-      }
       const after = closeIdx + 1;
       let dest = null;
       let title = null;
@@ -1830,6 +1810,13 @@ function tokenize(s, refs, opts) {
         dest = def.dest;
         title = def.title;
         next = after;
+      }
+      // A link cannot contain another link: if the link text itself
+      // forms a link, the inner one wins and this opener stays literal.
+      // (An image may contain a link in its alt text, which is flattened.)
+      if (!isImage && textHasLink(linkText, refs)) {
+        advance(i + 1);
+        continue;
       }
       flush(i);
       if (isImage) {
@@ -1929,8 +1916,16 @@ function flattenTokens(toks, matches) {
 }
 
 function flattenAlt(text, refs) {
-  const parsed = tokenize(text, refs, { noLinks: true });
+  const parsed = tokenize(text, refs, {});
   return flattenTokens(parsed.toks, parsed.matches);
+}
+
+// Whether the text forms a link when parsed (used to let the innermost
+// link win: a link cannot contain another link).
+function textHasLink(text, refs) {
+  if (!text.includes('[')) return false;
+  const parsed = tokenize(text, refs, {});
+  return parsed.toks.some((tk) => tk.t === 'link');
 }
 
 
